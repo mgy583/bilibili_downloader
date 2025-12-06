@@ -254,7 +254,8 @@ class BilibiliDownloader:
         cmd = ['ffmpeg', '-i', video_file, '-i', audio_file, '-c', 'copy', '-y', output_file]
         print(f"\n🎬 合并: {os.path.basename(output_file)}")
         
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # 使用 PIPE 但不解码，避免 Windows 下的编码问题
+        result = subprocess.run(cmd, capture_output=True)
         if result.returncode == 0:
             print("✅ 合并成功!")
             for f in [video_file, audio_file]:
@@ -262,7 +263,12 @@ class BilibiliDownloader:
                     os.remove(f)
             return True
         else:
-            print(f"❌ 合并失败: {result.stderr}")
+            # 尝试解码错误信息，失败则显示原始字节
+            try:
+                stderr = result.stderr.decode('utf-8', errors='ignore')
+            except Exception:
+                stderr = str(result.stderr)
+            print(f"❌ 合并失败: {stderr}")
             return False
 
     def sanitize_filename(self, filename):
