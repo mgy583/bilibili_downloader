@@ -24,6 +24,10 @@ class BilibiliDownloader:
 
         if cookie:
             self.session.headers['Cookie'] = cookie
+            print("✅ Cookie已设置")
+        else:
+            print("⚠️  未设置Cookie，可能只能下载低画质")
+        
         self.progress_lock = Lock()
 
     def normalize_url(self, input_str):
@@ -47,10 +51,12 @@ class BilibiliDownloader:
     def get_video_page(self, url):
         """获取视频页面"""
         try:
+            print(f"请求: {url}")
             response = self.session.get(url, timeout=30)
             response.raise_for_status()
             return response.text
-        except Exception:
+        except Exception as e:
+            print(f"❌ 请求失败: {e}")
             return None
 
     def extract_playinfo(self, html):
@@ -87,12 +93,15 @@ class BilibiliDownloader:
         try:
             r = self.session.get('https://api.bilibili.com/x/player/playurl', params=params, headers=headers, timeout=20)
             if r.status_code != 200:
+                print(f"⚠️ playurl API状态码: {r.status_code}")
                 return None
             j = r.json()
             if j.get('code') != 0:
+                print(f"⚠️ playurl API错误: code={j.get('code')} message={j.get('message')}")
                 return None
             return j
-        except Exception:
+        except Exception as e:
+            print(f"⚠️ playurl API异常: {e}")
             return None
 
     def get_video_info(self, url):
@@ -106,6 +115,9 @@ class BilibiliDownloader:
 
         bv_match = re.search(r'/video/(BV[a-zA-Z0-9]+)', url)
         bvid = bv_match.group(1) if bv_match else 'unknown'
+        
+        print(f"\n📹 视频: {title}")
+        print(f"🔖 BV号: {bvid}")
 
         playinfo = self.extract_playinfo(html)
         initial = self.extract_initial_state(html)
@@ -194,12 +206,12 @@ class BilibiliDownloader:
                                     print(f'\r[{os.path.basename(filename)}] {progress:.1f}%', end='', flush=True)
 
                 with self.progress_lock:
-                    print(f'\r[{os.path.basename(filename)}] 完成!')
+                    print(f'\r[{os.path.basename(filename)}] 完成!{" "*20}')
                 return True
 
             except Exception:
                 with self.progress_lock:
-                    print(f'\r[{os.path.basename(filename)}] 尝试 {attempt+1}/{len(urls_to_try)} 失败')
+                    print(f'\r[{os.path.basename(filename)}] 尝试 {attempt+1}/{len(urls_to_try)} 失败{" "*20}')
 
         return False
 
@@ -232,6 +244,7 @@ class BilibiliDownloader:
             subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
             return True
         except Exception:
+            print("❌ 未找到ffmpeg")
             return False
 
     def merge_files(self, video_file, audio_file, output_file):
@@ -239,21 +252,17 @@ class BilibiliDownloader:
             return False
 
         cmd = ['ffmpeg', '-i', video_file, '-i', audio_file, '-c', 'copy', '-y', output_file]
-
-        # Capture raw bytes to avoid text-decoding errors on Windows consoles
-        result = subprocess.run(cmd, capture_output=True)
+        print(f"\n🎬 合并: {os.path.basename(output_file)}")
+        
+        result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
+            print("✅ 合并成功!")
             for f in [video_file, audio_file]:
                 if os.path.exists(f):
                     os.remove(f)
             return True
         else:
-            stderr = None
-            try:
-                stderr = result.stderr.decode('utf-8', errors='replace') if result.stderr else ''
-            except Exception:
-                stderr = str(result.stderr)
-            print(f"❌ 合并失败: {stderr}")
+            print(f"❌ 合并失败: {result.stderr}")
             return False
 
     def sanitize_filename(self, filename):
@@ -262,16 +271,57 @@ class BilibiliDownloader:
         return filename[:80].strip()
 
     def select_quality(self, videos):
+        """质量选择"""
         if not videos:
+            print("❌ 无可用视频流")
             return []
-        return [videos[0]]
+        
+        max_res = max(v['width'] for v in videos)
+        if max_res < 1280:
+            print("\n⚠️  警告：当前只能获取低画质！")
+            print("    原因：未提供有效Cookie或需要大会员")
+        
+        print("\n" + "="*70)
+        print("  可用视频质量")
+        print("="*70)
+        
+        codec_map = {'avc1': 'H.264', 'hev1': 'HEVC', 'av01': 'AV1'}
+        
+        for i, v in enumerate(videos, 1):
+            codec = v['codecs'].split('.')[0] if v['codecs'] else ''
+            codec_name = codec_map.get(codec, codec or 'unknown')
+            print(f"{i:2d}. {v['width']:4d}x{v['height']:4d} | "
+                  f"码率: {v['bandwidth']/1024:.0f}KB/s | 编码: {codec_name}")
+        
+        print("\n选项: 数字/回车(最高)/all(全部)")
+        
+        while True:
+            choice = input("\n请选择: ").strip().lower()
+            
+            if choice == '':
+                return [videos[0]]
+            
+            if choice == 'all':
+                return videos
+            
+            try:
+                index = int(choice) - 1
+                if 0 <= index < len(videos):
+                    return [videos[index]]
+                else:
+                    print(f"❌ 请输入 1-{len(videos)}")
+            except ValueError:
+                print("❌ 无效输入")
 
     def download_single_quality(self, video_info, audio_info, output_dir, title, bvid):
         base_name = f"{title}_{video_info['width']}x{video_info['height']}_{bvid}.mp4"
         output_file = os.path.join(output_dir, self.sanitize_filename(base_name))
 
         if os.path.exists(output_file):
+            print(f"\n⏭️  已存在: {os.path.basename(output_file)}")
             return True
+        
+        print(f"\n🎯 正在下载: {video_info['width']}x{video_info['height']}")
 
         video_temp, audio_temp = self.download_parallel(video_info, audio_info, output_dir)
 
@@ -281,28 +331,46 @@ class BilibiliDownloader:
         return self.merge_files(video_temp, audio_temp, output_file)
 
     def download_video(self, url, output_dir='downloads', auto_all=False):
+        """主流程"""
+        print("="*70)
+        print("B站视频智能下载器")
+        print("="*70)
+        
         try:
             normalized_url = self.normalize_url(url)
-        except ValueError:
+            print(f"解析: {url} → {normalized_url}")
+        except ValueError as e:
+            print(f"❌ {e}")
             return False
-
+        
         info = self.get_video_info(normalized_url)
         if not info or not info['playinfo']:
+            print("\n❌ 无法获取视频数据")
+            print("提示：请确认SESSDATA有效，或尝试使用二维码登录刷新Cookie。")
             return False
-
+        
         videos, audios = self.parse_streams(info['playinfo'])
         if not videos or not audios:
+            print("\n❌ 未解析到视频/音频流")
             return False
-
+        
         os.makedirs(output_dir, exist_ok=True)
-
-        selected_videos = videos if auto_all else self.select_quality(videos)
+        
+        selected_videos = self.select_quality(videos) if not auto_all else videos
+        
         best_audio = audios[0]
-
+        
         results = []
         for video_info in selected_videos:
             result = self.download_single_quality(video_info, best_audio, output_dir, info['title'], info['bvid'])
             results.append(result)
-
-        success_count = sum(1 for r in results if r)
+        
+        success_count = sum(results)
+        total_count = len(selected_videos)
+        
+        print("\n" + "="*70)
+        print(f"完成: {success_count}/{total_count} 成功")
+        print(f"路径: {os.path.abspath(output_dir)}")
+        print("="*70)
+        
         return success_count > 0

@@ -13,14 +13,15 @@ def main(argv=None):
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog='''
 使用方法:
-  # 获取Cookie（三选一）
-  --qr-login           # 二维码登录
-  --get-cookie         # 从浏览器提取
-  --cookie "SESSDATA=xx"  # 手动输入
-
-下载视频:
-  BV1xx411c7mD
-  "https://www.bilibili.com/video/BV1xx411c7mD"
+  # 1. 获取Cookie（三选一）
+  python -m bili_downloader --qr-login           # 推荐：二维码登录
+  python -m bili_downloader --get-cookie         # 从浏览器提取
+  python -m bili_downloader --cookie "SESSDATA=xx"  # 手动输入
+  
+  # 2. 下载视频
+  python -m bili_downloader BV1xx411c7mD
+  python -m bili_downloader "https://www.bilibili.com/video/BV1xx411c7mD"
+  python -m bili_downloader BV1xx411c7mD -o ~/Videos --all
 ''')
 
     parser.add_argument('input', nargs='?', help='BV号/视频URL')
@@ -31,29 +32,44 @@ def main(argv=None):
     parser.add_argument('--all', action='store_true', help='下载所有质量')
     args = parser.parse_args(argv)
 
+    # Cookie获取模式
     if args.get_cookie:
+        print("\n" + "="*60)
+        print("Cookie提取模式")
+        print("="*60)
         cookie = CookieHelper.from_browser()
         if cookie:
             config_path = Path.home() / '.bili_cookie'
             with open(config_path, 'w') as f:
                 f.write(cookie)
-            print(f"✅ Cookie已保存: {config_path}")
+            print(f"\n✅ Cookie已保存: {config_path}")
         sys.exit(0)
 
     if args.qr_login:
-        cookie = CookieHelper.from_qr()
-        if cookie:
-            config_path = Path.home() / '.bili_cookie'
-            with open(config_path, 'w') as f:
-                f.write(cookie)
-            print(f"✅ Cookie已保存: {config_path}")
-        sys.exit(0)
+        print("\n" + "="*60)
+        print("二维码登录模式")
+        print("="*60)
+        try:
+            cookie = CookieHelper.from_qr()
+            if cookie:
+                config_path = Path.home() / '.bili_cookie'
+                with open(config_path, 'w') as f:
+                    f.write(cookie)
+                print(f"\n✅ Cookie已保存: {config_path}")
+            sys.exit(0)
+        except Exception as e:
+            print(f"\n❌ 二维码登录失败: {e}")
+            import traceback
+            traceback.print_exc()
+            sys.exit(1)
 
+    # 下载模式
     if not args.input:
         print("❌ 错误: 必须提供视频URL或BV号")
-        parser.print_help()
+        print("运行: python -m bili_downloader --help 查看帮助")
         sys.exit(1)
 
+    # 加载Cookie优先级：命令行 > 配置文件 > 无
     cookie = args.cookie
     config_path = Path.home() / '.bili_cookie'
     if not cookie and config_path.exists():
