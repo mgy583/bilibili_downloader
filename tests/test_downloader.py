@@ -1,21 +1,25 @@
-import pytest
-
+import unittest
 from bili_downloader.downloader import BilibiliDownloader
 
+class TestDownloader(unittest.TestCase):
+    def setUp(self):
+        self.d = BilibiliDownloader()
 
-def test_sanitize_filename():
-    d = BilibiliDownloader()
-    name = 'a<>:"|?*\/test\n.txt'
-    out = d.sanitize_filename(name)
-    assert '<' not in out and '>' not in out and '\n' not in out
-    assert len(out) <= 80
+    def test_sanitize_filename(self):
+        name = 'a<>:"|?*/test\n.txt'
+        out = self.d.sanitize_filename(name)
+        self.assertNotIn('<', out)
+        self.assertNotIn('>', out)
+        self.assertNotIn('\n', out)
+        self.assertLessEqual(len(out), 80)
 
+    def test_normalize_url_bv(self):
+        result = self.d.normalize_url('BV1xx411c7mD')
+        self.assertTrue(result.startswith('https://www.bilibili.com/video/'))
 
-def test_normalize_url_bv():
-    d = BilibiliDownloader()
-    assert d.normalize_url('BV1xx411c7mD').startswith('https://www.bilibili.com/video/')
+    def test_normalize_url_http(self):
+        url = 'https://www.bilibili.com/video/BV1xx411c7mD'
+        self.assertEqual(self.d.normalize_url(url), url)
 
-
-def test_normalize_url_http():
-    d = BilibiliDownloader()
-    assert d.normalize_url('https://www.bilibili.com/video/BV1xx411c7mD') == 'https://www.bilibili.com/video/BV1xx411c7mD'
+if __name__ == '__main__':
+    unittest.main()
