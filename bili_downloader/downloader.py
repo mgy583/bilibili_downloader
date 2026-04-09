@@ -4,6 +4,8 @@ import os
 import json
 import subprocess
 import requests
+import random
+import time
 from tqdm import tqdm
 from requests.adapters import HTTPAdapter
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -194,7 +196,8 @@ class BilibiliDownloader:
 
     def download_stream(self, url, filename, backup_urls=None, connections=2, position=0):
         urls_to_try = [url] + (backup_urls or [])
-        
+        random.shuffle(urls_to_try)
+
         total_size = 0
         for try_url in urls_to_try:
             try:
@@ -205,25 +208,66 @@ class BilibiliDownloader:
                 )
                 total_size = int(head.headers.get('content-length', 0))
                 if total_size > 0:
-                    url = try_url
                     break
-            except Exception:
+            except:
                 continue
-        
+
         if total_size == 0 or connections <= 1:
             return self.download_single(url, filename, backup_urls)
-        
+
+        def measure_speed(test_url):
+            try:
+                headers = {'Range': 'bytes=0-524288'}  # 1MB
+                r = self.session.get(test_url, headers=headers, stream=True, timeout=10)
+
+                start = time.time()
+                size = 0
+
+                for chunk in r.iter_content(262144):
+                    size += len(chunk)
+                    if size >= 1024 * 1024:
+                        break
+
+                duration = time.time() - start
+                return size / duration if duration > 0 else 0
+            except:
+                return 0
+
+        url_speeds = []
+        for u in urls_to_try:
+            speed = measure_speed(u)
+            if speed > 20 * 1024:  # 过滤极慢源（20KB/s）
+                url_speeds.append((u, speed))
+
+        if not url_speeds:
+            url_speeds = [(u, 1) for u in urls_to_try]  # fallback
+
+        # 按速度排序
+        url_speeds.sort(key=lambda x: x[1], reverse=True)
+        url_speeds = url_speeds[:2]
+
+        total_speed = sum(s for _, s in url_speeds)
+
+        assigned_urls = []
+        for i in range(connections):
+            r = i / connections
+            acc = 0
+            for u, s in url_speeds:
+                acc += s / total_speed
+                if r <= acc:
+                    assigned_urls.append(u)
+                    break
+
         chunk_size = total_size // connections
         ranges = [
             (i * chunk_size,
             (i + 1) * chunk_size - 1 if i < connections - 1 else total_size - 1)
             for i in range(connections)
         ]
-        
+
         temp_files = [f"{filename}.part{i}" for i in range(connections)]
         success_flags = [False] * connections
-    
-        from tqdm import tqdm
+
         pbar = tqdm(
             total=total_size,
             desc=os.path.basename(filename),
@@ -233,16 +277,36 @@ class BilibiliDownloader:
             leave=False,
             dynamic_ncols=True
         )
-    
+
         lock = Lock()
-    
+
         def download_part(idx, start, end):
+            primary_url = assigned_urls[idx]
+
             headers = {
                 'Range': f'bytes={start}-{end}',
                 'Referer': 'https://www.bilibili.com'
             }
-    
+
+            # 优先主URL
+            try:
+                r = self.session.get(primary_url, headers=headers, stream=True, timeout=30)
+                if r.status_code in (200, 206):
+                    with open(temp_files[idx], 'wb') as f:
+                        for chunk in r.iter_content(chunk_size=1024 * 1024):
+                            if chunk:
+                                f.write(chunk)
+                                with lock:
+                                    pbar.update(len(chunk))
+                    success_flags[idx] = True
+                    return
+            except:
+                pass
+
+            # fallback
             for try_url in urls_to_try:
+                if try_url == primary_url:
+                    continue
                 try:
                     r = self.session.get(try_url, headers=headers, stream=True, timeout=30)
                     if r.status_code in (200, 206):
@@ -254,27 +318,26 @@ class BilibiliDownloader:
                                         pbar.update(len(chunk))
                         success_flags[idx] = True
                         return
-                except Exception:
+                except:
                     continue
-    
+
         threads = []
         for i, (s, e) in enumerate(ranges):
             t = Thread(target=download_part, args=(i, s, e))
             t.start()
             threads.append(t)
-    
+
         for t in threads:
             t.join()
-    
+
         pbar.close()
-    
-        # 检查是否成功
+
         if not all(success_flags):
             for f in temp_files:
                 if os.path.exists(f):
                     os.remove(f)
             return False
-    
+
         try:
             with open(filename, 'wb') as outfile:
                 for temp in temp_files:
@@ -282,9 +345,8 @@ class BilibiliDownloader:
                         outfile.write(infile.read())
                     os.remove(temp)
             return True
-        except Exception:
-            return False
-            
+        except:
+            return False            
         
     def download_single(self, url, filename, backup_urls=None):
         urls_to_try = [url] + (backup_urls or [])
