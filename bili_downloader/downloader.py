@@ -219,25 +219,39 @@ class BilibiliDownloader:
         video_temp = os.path.join(output_dir, f"temp_video_{video_info['id']}.m4s")
         audio_temp = os.path.join(output_dir, f"temp_audio_{audio_info['id']}.m4s")
 
+        # 使用回调而非等待全部完成，更快发现失败
+        def download_with_cleanup(info, temp_file):
+            try:
+                success = self.download_stream(
+                    info['url'], 
+                    temp_file, 
+                    info.get('backup_urls')
+                )
+                return success, temp_file
+            except Exception:
+                return False, temp_file
+
         with ThreadPoolExecutor(max_workers=2) as executor:
-            future_video = executor.submit(
-                self.download_stream, video_info['url'], video_temp, video_info.get('backup_urls')
-            )
-            future_audio = executor.submit(
-                self.download_stream, audio_info['url'], audio_temp, audio_info.get('backup_urls')
-            )
+            futures = {
+                executor.submit(download_with_cleanup, video_info, video_temp): 'video',
+                executor.submit(download_with_cleanup, audio_info, audio_temp): 'audio'
+            }
 
-            results = []
-            for future in as_completed([future_video, future_audio]):
-                results.append(future.result())
+            results = {}
+            for future in as_completed(futures):
+                stream_type = futures[future]
+                success, temp_file = future.result()
+                results[stream_type] = {'success': success, 'file': temp_file}
 
-        if all(results):
+        # 处理结果
+        if all(r['success'] for r in results.values()):
             return video_temp, audio_temp
-        else:
-            for f in [video_temp, audio_temp]:
-                if os.path.exists(f):
-                    os.remove(f)
-            return None, None
+
+        # 清理失败下载
+        for r in results.values():
+            if os.path.exists(r['file']):
+                os.remove(r['file'])
+        return None, None
 
     def check_ffmpeg(self):
         try:
