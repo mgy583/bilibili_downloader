@@ -4,9 +4,10 @@ import os
 import json
 import subprocess
 import requests
+from tqdm import tqdm
 from requests.adapters import HTTPAdapter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
+from threading import Lock, Thread
 
 
 class BilibiliDownloader:
@@ -191,26 +192,129 @@ class BilibiliDownloader:
         audios.sort(key=lambda x: x['bandwidth'], reverse=True)
         return videos, audios
 
-    def download_stream(self, url, filename, backup_urls=None):
+    def download_stream(self, url, filename, backup_urls=None, connections=2, position=0):
         urls_to_try = [url] + (backup_urls or [])
-
+        
+        total_size = 0
+        for try_url in urls_to_try:
+            try:
+                head = self.session.head(
+                    try_url,
+                    timeout=10,
+                    headers={'Referer': 'https://www.bilibili.com'}
+                )
+                total_size = int(head.headers.get('content-length', 0))
+                if total_size > 0:
+                    url = try_url
+                    break
+            except Exception:
+                continue
+        
+        if total_size == 0 or connections <= 1:
+            return self.download_single(url, filename, backup_urls)
+        
+        chunk_size = total_size // connections
+        ranges = [
+            (i * chunk_size,
+            (i + 1) * chunk_size - 1 if i < connections - 1 else total_size - 1)
+            for i in range(connections)
+        ]
+        
+        temp_files = [f"{filename}.part{i}" for i in range(connections)]
+        success_flags = [False] * connections
+    
+        from tqdm import tqdm
+        pbar = tqdm(
+            total=total_size,
+            desc=os.path.basename(filename),
+            unit='B',
+            unit_scale=True,
+            position=position,
+            leave=False,
+            dynamic_ncols=True
+        )
+    
+        lock = Lock()
+    
+        def download_part(idx, start, end):
+            headers = {
+                'Range': f'bytes={start}-{end}',
+                'Referer': 'https://www.bilibili.com'
+            }
+    
+            for try_url in urls_to_try:
+                try:
+                    r = self.session.get(try_url, headers=headers, stream=True, timeout=30)
+                    if r.status_code in (200, 206):
+                        with open(temp_files[idx], 'wb') as f:
+                            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                                if chunk:
+                                    f.write(chunk)
+                                    with lock:
+                                        pbar.update(len(chunk))
+                        success_flags[idx] = True
+                        return
+                except Exception:
+                    continue
+    
+        threads = []
+        for i, (s, e) in enumerate(ranges):
+            t = Thread(target=download_part, args=(i, s, e))
+            t.start()
+            threads.append(t)
+    
+        for t in threads:
+            t.join()
+    
+        pbar.close()
+    
+        # 检查是否成功
+        if not all(success_flags):
+            for f in temp_files:
+                if os.path.exists(f):
+                    os.remove(f)
+            return False
+    
+        try:
+            with open(filename, 'wb') as outfile:
+                for temp in temp_files:
+                    with open(temp, 'rb') as infile:
+                        outfile.write(infile.read())
+                    os.remove(temp)
+            return True
+        except Exception:
+            return False
+            
+        
+    def download_single(self, url, filename, backup_urls=None):
+        urls_to_try = [url] + (backup_urls or [])
+        
         for attempt, try_url in enumerate(urls_to_try):
             try:
-                response = self.session.get(try_url, stream=True, timeout=30)
+                response = self.session.get(
+                    try_url, 
+                    stream=True, 
+                    timeout=30,
+                    headers={'Referer': 'https://www.bilibili.com'}
+                )
                 response.raise_for_status()
 
                 total_size = int(response.headers.get('content-length', 0))
                 downloaded = 0
+                last_pct = -1
 
                 with open(filename, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
+                    for chunk in response.iter_content(chunk_size=1024 * 1024):
                         if chunk:
                             f.write(chunk)
                             downloaded += len(chunk)
+                            
                             if total_size > 0:
-                                progress = (downloaded / total_size) * 100
-                                with self.progress_lock:
-                                    print(f'\r[{os.path.basename(filename)}] {progress:.1f}%', end='', flush=True)
+                                current_pct = int(downloaded / total_size * 100)
+                                if current_pct != last_pct:
+                                    last_pct = current_pct
+                                    with self.progress_lock:
+                                        print(f'\r[{os.path.basename(filename)}] {current_pct}%', end='', flush=True)
 
                 with self.progress_lock:
                     print(f'\r[{os.path.basename(filename)}] 完成!{" "*20}')
@@ -220,44 +324,40 @@ class BilibiliDownloader:
                 with self.progress_lock:
                     print(f'\r[{os.path.basename(filename)}] 尝试 {attempt+1}/{len(urls_to_try)} 失败{" "*20}')
 
-        return False
+            return False
 
     def download_parallel(self, video_info, audio_info, output_dir):
         video_temp = os.path.join(output_dir, f"temp_video_{video_info['id']}.m4s")
         audio_temp = os.path.join(output_dir, f"temp_audio_{audio_info['id']}.m4s")
 
-        # 使用回调而非等待全部完成，更快发现失败
-        def download_with_cleanup(info, temp_file):
-            try:
-                success = self.download_stream(
-                    info['url'], 
-                    temp_file, 
-                    info.get('backup_urls')
-                )
-                return success, temp_file
-            except Exception:
-                return False, temp_file
-
         with ThreadPoolExecutor(max_workers=2) as executor:
-            futures = {
-                executor.submit(download_with_cleanup, video_info, video_temp): 'video',
-                executor.submit(download_with_cleanup, audio_info, audio_temp): 'audio'
-            }
+            # 视频用4连接（大文件），音频用2连接（小文件）
+            future_video = executor.submit(
+                self.download_stream,
+                video_info['url'],
+                video_temp,
+                video_info.get('backup_urls'),
+                4,  # 视频多连接
+                1
+            )
+            future_audio = executor.submit(
+                self.download_stream,
+                audio_info['url'],
+                audio_temp,
+                audio_info.get('backup_urls'),
+                2,  # 音频少连接
+                0
+            )
 
-            results = {}
-            for future in as_completed(futures):
-                stream_type = futures[future]
-                success, temp_file = future.result()
-                results[stream_type] = {'success': success, 'file': temp_file}
+            video_ok = future_video.result()
+            audio_ok = future_audio.result()
 
-        # 处理结果
-        if all(r['success'] for r in results.values()):
+        if video_ok and audio_ok:
             return video_temp, audio_temp
 
-        # 清理失败下载
-        for r in results.values():
-            if os.path.exists(r['file']):
-                os.remove(r['file'])
+        for f in [video_temp, audio_temp]:
+            if os.path.exists(f):
+                os.remove(f)
         return None, None
 
     def check_ffmpeg(self):

@@ -1,3 +1,4 @@
 requests>=2.0
 qrcode
 pytest
+tqdm
