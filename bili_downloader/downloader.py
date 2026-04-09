@@ -129,31 +129,65 @@ class BilibiliDownloader:
         print(f"\n📹 视频: {title}")
         print(f"🔖 BV号: {bvid}")
 
-        playinfo = self.extract_playinfo(html)
         initial = self.extract_initial_state(html)
         cid = None
 
-        if initial:
-            try:
-                cid = initial['videoData']['cid']
-            except Exception:
-                try:
-                    pages = initial.get('videoData', {}).get('pages', [])
-                    if pages:
-                        cid = pages[0].get('cid')
-                except Exception:
-                    pass
+        playlist = []
+        
+        if not initial:
+            return {'title': title, 'bvid': bvid, 'playlist': playlist}
+        
+        sections = initial.get('sectionsInfo')
+        if sections:
+            for sec in sections:
+                for ep in sec.get('episodes', []):
+                    playlist.append({
+                        'bvid': ep.get('bvid'),
+                        'cid': ep.get('cid'),
+                        'page': ep.get('title'),
+                        'part': ep.get('title')
+                    })
+        
+        if not playlist:
+            ugc = initial.get('ugc_season')
+            if ugc:
+                for sec in ugc.get('sections', []):
+                    for ep in sec.get('episodes', []):
+                        playlist.append({
+                            'bvid': ep.get('bvid'),
+                            'cid': ep.get('cid'),
+                            'page': ep.get('title'),
+                            'part': ep.get('title')
+                        })
+        
+        if not playlist:
+            video_data = initial.get('videoData', {})
+            pages = video_data.get('pages')
+            
+            if isinstance(pages, list) and pages:
+                for p in pages:
+                    playlist.append({
+                        'bvid': bvid,
+                        'cid': p.get('cid'),
+                        'page': p.get('page'),
+                        'part': p.get('part', '')
+                    })
+        
+        if not playlist:
+            cid = initial.get('videoData', {}).get('cid')
+            if cid:
+                playlist.append({
+                    'bvid': bvid,
+                    'cid': cid,
+                    'page': 1,
+                    'part': 'P1'
+                })        
 
-        api_playinfo = None
-        if not playinfo and cid and bvid != 'unknown':
-            api_playinfo = self.call_playurl_api(bvid, cid)
-
-        final_playinfo = api_playinfo if api_playinfo else playinfo
+        print(initial.keys() if initial else "initial=None")
         return {
             'title': title,
             'bvid': bvid,
-            'cid': cid,
-            'playinfo': final_playinfo
+            'playlist': playlist,
         }
 
     def parse_streams(self, playinfo):
@@ -393,7 +427,6 @@ class BilibiliDownloader:
         audio_temp = os.path.join(output_dir, f"temp_audio_{audio_info['id']}.m4s")
 
         with ThreadPoolExecutor(max_workers=2) as executor:
-            # 视频用4连接（大文件），音频用2连接（小文件）
             future_video = executor.submit(
                 self.download_stream,
                 video_info['url'],
@@ -407,8 +440,6 @@ class BilibiliDownloader:
                 audio_info['url'],
                 audio_temp,
                 audio_info.get('backup_urls'),
-                2,  # 音频少连接
-                0
             )
 
             video_ok = future_video.result()
@@ -520,46 +551,82 @@ class BilibiliDownloader:
         return self.merge_files(video_temp, audio_temp, output_file)
 
     def download_video(self, url, output_dir='downloads', auto_all=False):
-        """主流程"""
         print("="*70)
-        print("B站视频智能下载器")
+        print("B站视频下载")
         print("="*70)
-        
+
         try:
             normalized_url = self.normalize_url(url)
             print(f"解析: {url} → {normalized_url}")
         except ValueError as e:
             print(f"❌ {e}")
             return False
-        
+
         info = self.get_video_info(normalized_url)
-        if not info or not info['playinfo']:
-            print("\n❌ 无法获取视频数据")
-            print("提示：请确认SESSDATA有效，或尝试使用二维码登录刷新Cookie。")
+        if not info or not info['playlist']:
+            print("❌ 获取视频信息失败")
             return False
-        
-        videos, audios = self.parse_streams(info['playinfo'])
-        if not videos or not audios:
-            print("\n❌ 未解析到视频/音频流")
-            return False
-        
+
         os.makedirs(output_dir, exist_ok=True)
-        
-        selected_videos = self.select_quality(videos) if not auto_all else videos
-        
-        best_audio = audios[0]
-        
+
         results = []
-        for video_info in selected_videos:
-            result = self.download_single_quality(video_info, best_audio, output_dir, info['title'], info['bvid'])
+
+        selected_quality = None
+
+        for idx, item in enumerate(info['playlist']):
+            cid = item['cid']
+            part_title = item['part']
+            page = item['page']
+
+            print(f"\n📦 下载 P{page}: {part_title}")
+
+            playinfo = self.call_playurl_api(item['bvid'], cid)
+
+            if not playinfo or playinfo.get('code') != 0:
+                print("❌ 获取流失败")
+                results.append(False)
+                continue
+
+            videos, audios = self.parse_streams(playinfo)
+
+            if not videos or not audios:
+                print("❌ 无流")
+                results.append(False)
+                continue
+
+            # ✅ 只在第一次选
+            if selected_quality is None:
+                selected_quality = self.select_quality(videos)[0]
+
+            video_info = self.match_quality(videos, selected_quality)
+
+            best_audio = audios[0]
+
+            title = f"{info['title']}_P{page}_{part_title}"
+
+            result = self.download_single_quality(
+                video_info,
+                best_audio,
+                output_dir,
+                title,
+                item['bvid']
+            )
+
             results.append(result)
-        
+
         success_count = sum(results)
-        total_count = len(selected_videos)
-        
+        total_count = len(results)
+
         print("\n" + "="*70)
         print(f"完成: {success_count}/{total_count} 成功")
         print(f"路径: {os.path.abspath(output_dir)}")
         print("="*70)
-        
+
         return success_count > 0
+
+    def match_quality(self, videos, target):
+        for v in videos:
+            if v['width'] == target['width'] and v['height'] == target['height']:
+                return v
+        return videos[0]
+
