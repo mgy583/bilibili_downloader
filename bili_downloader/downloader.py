@@ -4,11 +4,9 @@ import os
 import json
 import subprocess
 import requests
-import time
-import shutil
+from requests.adapters import HTTPAdapter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
-from pathlib import Path
 
 
 class BilibiliDownloader:
@@ -16,10 +14,19 @@ class BilibiliDownloader:
 
     def __init__(self, cookie=None):
         self.session = requests.Session()
+        adapter = HTTPAdapter(
+            pool_connections=10,   # 连接池大小
+            pool_maxsize=10,       # 最大保持连接数
+            max_retries=0          # 处理重试次数
+        )
+        self.session.mount('http://', adapter)
+        self.session.mount('https://', adapter)
+
         self.session.headers.update({
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121 Safari/537.36',
             'Referer': 'https://www.bilibili.com',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Connection': 'keep-alive',
         })
 
         if cookie:
