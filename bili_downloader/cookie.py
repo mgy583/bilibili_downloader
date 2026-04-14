@@ -55,8 +55,8 @@ class CookieHelper:
             
             print(f"✅ 找到 {browser}: {db_path}")
 
+            temp_db = Path('temp_bili_cookie.db')
             try:
-                temp_db = Path('temp_bili_cookie.db')
                 if temp_db.exists():
                     temp_db.unlink()
                 shutil.copy2(db_path, temp_db)
